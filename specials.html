@@ -192,7 +192,6 @@
           content: counter(main-idx-var, custom-hex);
           color: white;
           text-shadow: 1px 1px black;
-          font-size: calc(var(--square-size) * 0.28);  /* label tracks the zoom */
 
           background-size: 100% 100%;
           image-rendering: pixelated;
@@ -208,6 +207,19 @@
          unused. */
       --x-y: calc((1 - sign(var(--cmp-x-outer))) * var(--y) + (1 - sign(var(--cmp-y-outer))) * var(--x));
       --cmp-x-y-show: mod(var(--x-y), 4);
+
+      /* Android Chrome composites pinned sticky cells on their own layer, and touch
+         scrolling / pinch zoom yield fractional scroll offsets -- the ruler and the
+         scrollport edge can round to different device pixels, exposing a sub-pixel sliver
+         of the square sliding beneath, just outside the ruler. Fix: bleed the outer
+         cells' opaque fill 1px toward the outer edge (the box-shadow in the outer block
+         below). --bleed-* gives the direction: -1 on the leading outer line, +1 on the
+         trailing one, 0 elsewhere -- the same two factors --cmp-*-outer multiplies,
+         compared instead of multiplied so the two edges stay distinguishable. The bleed
+         points only outward: clipped by the scrollport when pinned, invisible against
+         the matching Canvas background when not, never over interior squares. */
+      --bleed-x: calc(sign(var(--x) - var(--x-min) + 1) - sign(var(--x-max) + 1 - var(--x)));
+      --bleed-y: calc(sign(var(--y) - var(--y-min) + 1) - sign(var(--y-max) + 1 - var(--y)));
 
       /* Every cell is sticky, but only outer cells actually pin. An outer cell pins at
          inset 0 (cmp=0); an interior cell (cmp positive) gets a negative threshold, so if
@@ -245,6 +257,7 @@
         &::before {
           content: "";
           background: Canvas;
+          box-shadow: calc(var(--bleed-x) * 1px) calc(var(--bleed-y) * 1px) 0 Canvas;
         }
       }
 

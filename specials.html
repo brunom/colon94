@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Interactive Specials Map</title>
+  <style>
+
+    /* Support both light and dark modes. */
+    :root {
+      color-scheme: light dark;
+    }
+
+    /* Why every test gets its own custom property instead of inlining the calc into the
+       query: a plain style() query, style(--name: value), compares a *stored* property
+       against a literal, and that form is supported everywhere it needs to be
+       (Chrome/Edge 111+, Safari 18+, Firefox 128+). Writing the math directly in the
+       query -- style(mod(...) = 0) -- would drop these properties, but that range form
+       only shipped in Chrome 142 and exists in no other browser yet, so it would render
+       blank in Firefox, Safari, and older Edge. The vars are the price of cross-browser
+       support: each one parks a computed value where a plain style() query can read it. */
+
+    /* All -1 sentinels (out of every legit range) so a failed calc is obvious. */
+    @property --cmp-checkerboard { syntax: "<number>"; inherits: true; initial-value: -1; }
+    @property --main-idx { syntax: "<number>"; inherits: true; initial-value: -1; }
+    @property --cmp-main-forested { syntax: "<number>"; inherits: true; initial-value: -1; }
+    @property --cmp-main-cleared { syntax: "<number>"; inherits: true; initial-value: -1; }
+    @property --cmp-twin-forested { syntax: "<number>"; inherits: true; initial-value: -1; }
+    @property --cmp-twin-cleared { syntax: "<number>"; inherits: true; initial-value: -1; }
+
+    /* --cmp-x-outer / --cmp-y-outer follow the cmp-* convention exactly: 0 means the cell
+       IS on that axis's outer band, any positive value means interior -- the same
+       0-is-a-match / nonzero-otherwise shape as every other --cmp-* here. 0 is the only
+       value ever compared in a query; the interior cases negate instead, with
+       `not style(--cmp-*-outer: 0)`, so nothing relies on the flag being two-valued (the
+       one spot that wants a strict 0/1, --x-y, normalises with sign() itself). */
+    @property --cmp-x-outer { syntax: "<integer>"; inherits: true; initial-value: -1; }
+    @property --cmp-y-outer { syntax: "<integer>"; inherits: true; initial-value: -1; }
+
+    /* Per-cell coordinate shown in the outer cells, and its value mod 4: the number
+       appears only when --cmp-x-y-show is 0, so the every-4th cadence lives in CSS.
+       --x-y inherits so the ::before can read it for the counter. */
+    @property --x-y { syntax: "<integer>"; inherits: true; initial-value: -1; }
+    @property --cmp-x-y-show { syntax: "<number>"; inherits: true; initial-value: -1; }
+
+    /* Hex digits for the counter() that prints each 4x4-block index (used by the squares
+       ::before in the squares block of #map > *). Another global token cells reference by
+       name, so it lives up here with the property defs. */
+    @counter-style custom-hex {
+      system: numeric;
+      symbols: "0" "1" "2" "3" "4" "5" "6" "7" "8" "9" "A" "B" "C" "D" "E" "F";
+    }
+
+    /* Outer detection is derived, not tagged. The interior runs --x-min .. --x-max
+       (min assumed 1); the leading outer cell sits one line before --x-min and the
+       trailing one line past --x-max. Take the distance to each of those two outer
+       lines and multiply:
+
+         --cmp-x-outer = (x - x-min + 1) * (x-max + 1 - x)
+
+       (x - x-min + 1) is 0 exactly on the leading outer line and (x-max + 1 - x) is 0
+       exactly on the trailing one, so the product is 0 on either outer cell and positive
+       everywhere interior -- no need to normalise the nonzero case. The roles (square /
+       ruler / corner), sticky pinning and z-order all read it as-is. Only --x-y wants a
+       strict 0/1 and takes sign() locally. */
+
+    /* Full-viewport layout with no magic numbers: body is an auto/1fr grid and the two
+       children fall in in source order -- the slider takes the auto row, #map takes the
+       1fr row and gets everything left over. No line names, no per-child placement.
+       #map's size falls out of the layout. */
+    html {
+      height: 100%;
+      display: grid;
+      grid-template-rows: minmax(0, 1fr);
+    }
+    body {
+      display: grid;
+      grid-template-rows: auto 1fr;
+    }
+
+    /* #map is both the scroll container and the grid. */
+    #map {
+      --x-min: 1;
+      --y-min: 1;
+      --x-max: 56;
+      --y-max: 70;
+      --square-size: 64px;
+      --seed: 0;
+
+      display: grid;
+      grid-template-columns: var(--square-size) repeat(var(--x-max), var(--square-size)) var(--square-size);
+      grid-template-rows:    var(--square-size) repeat(var(--y-max), var(--square-size)) var(--square-size);
+
+      overflow: auto;            /* scroll map */
+      font-family: monospace;
+    }
+
+    /* Every child is a bare <div> carrying only --x / --y; its role, placement and paint
+       are all derived here. The rule reads back-to-front, matching paint order: shared
+       setup, then the inner (square) layer, then the outer layer (rulers + corner) that
+       sits on top -- and within each layer, props before the ::before paint.
+       Placement: with min assumed 1 the leading edge is coord 0 and the trailing is
+       max+1, so line = coord + 1 places every cell. */
+    #map > * {
+      /* -- shared: placement + the two outerness flags (0 = outer, 1+ = interior) -- */
+      grid-column: calc(var(--x) + 1);
+      grid-row:    calc(var(--y) + 1);
+
+      display: grid;
+
+      --cmp-x-outer: calc((var(--x) - var(--x-min) + 1) * (var(--x-max) + 1 - var(--x)));
+      --cmp-y-outer: calc((var(--y) - var(--y-min) + 1) * (var(--y-max) + 1 - var(--y)));
+
+      /* -- inner props: per-square index math. This CANNOT be gated behind a style()
+         query on the cell's own --cmp-x-outer / --cmp-y-outer: a declaration on
+         `#map > *` is filtered by the cell's *ancestor* container (#map), which has no
+         per-cell flag, so the query would be false everywhere and none of these would
+         ever be set. So they are computed on every cell unconditionally -- harmless on
+         outer cells, which never read them. Only the *paint* (the &::before rules) is
+         scoped to squares, and that works because a ::before's container IS its own
+         cell. */
+      --block-x: round(down, var(--x) / 4);
+      --block-y: round(down, var(--y) / 4);
+      --cmp-checkerboard: mod(var(--block-x) - var(--block-y), 2);
+      --main-idx: calc(4 * mod(var(--x) + 0, 4) + mod(var(--y) + 0, 4));
+      --twin-idx: calc(4 * mod(var(--x) + 2, 4) + mod(var(--y) + 2, 4));
+      --forested-idx: calc(var(--block-x) + 3 * var(--block-y) + var(--seed));
+      --cleared-idx: calc(var(--forested-idx) + 1);
+      --cmp-main-forested: mod(var(--main-idx) - var(--forested-idx), 16);
+      --cmp-main-cleared:  mod(var(--main-idx) - var(--cleared-idx),  16);
+      --cmp-twin-forested: mod(var(--twin-idx) - var(--forested-idx), 16);
+      --cmp-twin-cleared:  mod(var(--twin-idx) - var(--cleared-idx),  16);
+
+      /* ---------------------------------------------------------------- *
+         -- inner styles: SQUARES -- neither outer. This one style() query on the two flags
+         (neither outer) restricts the hex label and terrain to squares. Squares stay
+         effectively static (sticky but never pinned) and simply paint beneath the
+         positioned, z-indexed outer cells. Because terrain only ever shows on squares,
+         every background rule lives inside this block; outer cells match neither flag and
+         get only their flat Canvas fill (the outer layer below).
+       * ---------------------------------------------------------------- */
+      @container (not style(--cmp-x-outer: 0)) and (not style(--cmp-y-outer: 0)) {
+        /* Terrain tiles. Order matters: the cmp-* specials come after the checkerboard
+           base so a matching special overrides it (all equal specificity, source order
+           decides). */
+        &::before {
+          background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAABGlBMVEUAAAAAAKoAqgAAqqqqAACqSQCqVQCqqqpVVVVVVf9V/1VV////AAD/cQD//1X////7+/vz8/Pr6+vj4+Pb29vT09PLy8vDw8O+vr62traurq6mpqaenp6WlpaOjo6GhoaCgoJ5eXlxcXFpaWlhYWFZWVlRUVFJSUlFRUU8PDw0NDQsLCwkJCQcHBwUFBQMDAzb7//D2/Oyy+ueut+Oqtd5ms9pisNdebpNZa5BWaY0SZ4oOJIgLIoYHH0QEHUICG3X46q2z4aWuml1pk1VljQ0giAcbRAEXQS6ukGmqkGankGKjjx5gjxpcThdZTRRWTDPljS+hjCyeSyiaSiWXSCGURx5RRxtPBjPso66on2qkm2agl2GcVF1YUX/nXBUAAAAdUlEQVQYGQXBAQHDMAzAsMBz7BVBe/40Lo1XP85RRc6on9c9mOqIW6eQfA7iFmLbY1Ao1i28c3qWiMXnhIZK+byjFCainvkyoxC7zjPRUClGEallkeaauK0si4O4tYXrcfjEW7i1ffPkwx7efeI8D978XW56/tnoS1BxYFslAAAAAElFTkSuQmCC);
+        }
+        @container style(--cmp-checkerboard: 0) {
+          &::before {
+            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQBAMAAADt3eJSAAAAElBMVEXT09O6ukGqqqqmqkGankGKjjy3q3h7AAAAeUlEQVR42gXBMQ7DIAwF0G8wu0VgN1HYSdXshKo7UHr/q+Q9LOr11o+F08KXvTKOHpyuo6PnuA+WDWHqq0Qf4OSqAc3BDJv8ORnFb42aRrzJfEWWQjKltUeBOX9WC2do41JHDYjIN7E3yKcMLdTR/N7/PCyS3VKsNB8tKxIWa1+O8gAAAABJRU5ErkJggg==);
+          }
+        }
+        @container style(--cmp-main-forested: 0) {
+          &::before {
+            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAS1BMVEUAAAAAWQAPawEqgxMzMzNCQkJPPSFQmytmcS5qMwpxcXF1r0d4PQ96hDOISxCIcEuMkzOaWxOfhFmfpTuoZx2usjqzs7PBwcHj4+MHdkvNAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAp0lEQVQYGR2MUaLCMAgEF5q8YFskYa16/5M+6ifD7IA8DlV+3d8RFy/4MfTYhJeFdk9iG7KpqJhPbTENm+gYN0htrQUhMjZVSYpIkYSJAEh63LcbaHj+nUCXVkrP+gFrnYXuiRp8JnCuYtCfETHxeq3zWUQ6J5xZCh7FsGgTGZM5K7N2wBgVjUg8Sto/O8wQHoxU1fYjjqA5g7137HspCKthJtd5t2n/1A8Jgyxxj7IAAAAASUVORK5CYII=);
+          }
+        }
+        @container style(--cmp-main-cleared: 0) {
+          &::before {
+            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAMFBMVEWfpTv0zx/UqhSfhFmMkzNQmyt6hDOIcEtmcS50Xj4qgxNaYymISxAPawEAWQAAAADFnhwvAAAAiUlEQVR42gXBgWGEMBADwQWZkx5iq/9uM4Mm03QGGwJmevdpLEYMMb2eZhB2APed3VSxjJk+5+z2KlYEaacnvd/CJMSo97efvnUEjFev8x5aHLFEn3N2bST98OrT9uzGZv2B1Kj96pAlvNCCflWCBbZC1F1IxBhrUL9ajCGDMT01iUmwxE8VJv4HzKcG9uup5eQAAAAASUVORK5CYII=);
+          }
+        }
+        @container style(--cmp-twin-forested: 0) {
+          &::before {
+            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAJ1BMVEU0giB1pk1VljSWXSB1YUVlUTRRWTB5RRwcbRBJSUk8PDwEXQQAAABcf7xLAAAAgElEQVR42gXBgQGDQAzDQBEo6GPvP2/vkOtSlIyOzDVepCEeBSaYpuBOgDiT2nF3hWSw+jbZ3cHEpE/S3RUm+e6a0032CPrV5z1pdgXkuxvfJ80eGKXveX17chCkeXwf01sC49SYNKIg0P5a0QnoaH/dowKgTHoOwRFhgtwfjvgHtQEG0Lz7xgIAAAAASUVORK5CYII=);
+          }
+        }
+        @container style(--cmp-twin-cleared: 0) {
+          &::before {
+            background-image: url(data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAMAAAAoLQ9TAAAAElBMVEUEXQQMDAwUFBQcbRA0giBVljRTNrgWAAAACXBIWXMAAAsTAAALEwEAmpwYAAAAZklEQVQYGQXBAQEAMAyDMHaof8tPMMM0ppM50xGmkTXN0hG6O51LM9zR3Zk6h+6Y3DkzRmcT71RJPXTgaWSc2eBcTNsDlmeSWWeNM2jOvINdSlZpd88bpFOd87wobUyjO7FGRjnzA5jZAvkMB403AAAAAElFTkSuQmCC);
+          }
+        }
+
+        /* Base ::before: shared paint settings plus the hex label of the 4x4-block
+           index. It paints last within the square (text over terrain), and is order-
+           independent of the terrain above besides -- it only ever sets background-size /
+           -rendering and the label, never background-image. The `*-var` counter is a hack:
+           content: counter() is the only way to print a custom property's number (via the
+           custom-hex @counter-style up top), since content can't take var() directly;
+           it's reset immediately before the counter() that consumes it. */
+        &::before {
+          counter-reset: main-idx-var var(--main-idx);
+          content: counter(main-idx-var, custom-hex);
+          color: white;
+          text-shadow: 1px 1px black;
+
+          background-size: 100% 100%;
+          image-rendering: pixelated;
+        }
+      }
+
+      /* -- outer props: the coord a ruler prints, and the pin/stack machinery. Declared
+         on every cell but only bites on outer ones; interior cells carry neutral values.
+
+         --x-y: y on an L/R ruler (x outer), x on a T/B ruler (y outer). cmp is
+         0-or-positive, so sign() collapses it to 0/1 first; then (1 - sign(cmp)) is 1 on
+         the outer axis and picks that term. On a corner (both) or interior cell it is
+         unused. */
+      --x-y: calc((1 - sign(var(--cmp-x-outer))) * var(--y) + (1 - sign(var(--cmp-y-outer))) * var(--x));
+      --cmp-x-y-show: mod(var(--x-y), 4);
+
+      /* Every cell is sticky, but only outer cells actually pin. An outer cell pins at
+         inset 0 (cmp=0); an interior cell (cmp positive) gets a negative threshold, so if
+         it ever reaches an edge it parks off-screen -- and behind the opaque rulers
+         besides. Any value <= 0 works; the exact magnitude (cmp squares) doesn't matter.
+         The one hard requirement is that it stays <= 0: a positive inset would pin
+         interior cells one step *inside* the ruler band, into visible content. inset-
+         inline pins L/R rulers, inset-block pins T/B rulers; a corner has both at 0 and
+         pins to the corner. */
+      inset-inline: calc(var(--cmp-x-outer) * var(--square-size) * -1);
+      inset-block:  calc(var(--cmp-y-outer) * var(--square-size) * -1);
+      position: sticky;
+
+      /* z-rank = -(cmp-x + cmp-y). Only the *ordering* matters, so any constant offset is
+         pointless -- the negated sum alone ranks cells (bigger cmp sum = more interior =
+         lower). Two cells overlap while scrolling only if they share a row or a column,
+         i.e. share one cmp term; the more outer of the two carries the other term = 0, so
+         its sum is smaller and it ranks strictly higher. Thus a pinned ruler stays above
+         the interior it slides over, and the corner (both terms 0, the maximum) stays
+         above the rulers so its blank fill keeps a tick number from bleeding into the
+         corner square. */
+      z-index: calc(-1 * (var(--cmp-x-outer) + var(--cmp-y-outer)));
+
+      /* ---------------------------------------------------------------- *
+         -- outer styles: OUTER CELLS -- either outer (a ruler or the corner), drawn on
+         top of the squares. No class and no self-selector: a style() query reading the
+         cell's own --cmp-x-outer / --cmp-y-outer tags the ::before as the paint surface.
+         The opaque `background: Canvas` fills the cell (display: grid + the ::before
+         stretching to it), so a pinned outer cell stays opaque as it scrolls over the
+         squares. content: "" conjures the ::before box; the ruler rule below overrides it
+         with the coordinate. (The cell's own sticky / z-index / inset stay pure calc just
+         above -- only the ::before is query-driven.)
+       * ---------------------------------------------------------------- */
+      @container style(--cmp-x-outer: 0) or style(--cmp-y-outer: 0) {
+        &::before {
+          content: "";
+          background: Canvas;
+        }
+      }
+
+      /* A ruler is exactly one outer axis. On every 4th line it prints its coordinate.
+         The corner (both outer) is excluded, so it stays blank. */
+      @container ((style(--cmp-x-outer: 0) and (not style(--cmp-y-outer: 0))) or
+                  ((not style(--cmp-x-outer: 0)) and style(--cmp-y-outer: 0))) and
+                 style(--cmp-x-y-show: 0) {
+        &::before {
+          counter-reset: x-y-var var(--x-y);
+          content: counter(x-y-var);
+          color: GrayText;
+          display: grid;
+          place-content: center;
+        }
+      }
+    }
+
+    /* The slider takes the body grid's auto row. As a grid item it stretches to the full
+       column width on its own, so it needs no width/display of its own. */
+  </style>
+</head>
+<body>
+
+  <input type="range" id="slider" min="0" max="15" value="0"
+         oninput="map.style.setProperty('--seed', this.value)">
+
+  <div id="map"></div>
+
+  <script>
+    const styles = getComputedStyle(map);
+
+    const xMax = +styles.getPropertyValue('--x-max');
+    const yMax = +styles.getPropertyValue('--y-max');
+
+    // Every cell is a bare <div> carrying only its coords -- outer detection lives in the
+    // CSS (--cmp-x-outer / --cmp-y-outer, derived from --x / --y vs the [min, max] range).
+    // The band the JS walks is min-1 .. max+1, which with min assumed 1 is 0 .. max+1; the
+    // CSS turns those coords into every role, the sticky pin, the z-index and --x-y.
+    for (let y = 0; y <= yMax + 1; y++)
+      for (let x = 0; x <= xMax + 1; x++) {
+        const el = document.createElement('div');
+        el.style.setProperty('--x', x);
+        el.style.setProperty('--y', y);
+        map.appendChild(el);
+      }
+  </script>
+
+</body>
+</html>

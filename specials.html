@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
   <title>Interactive Specials Map</title>
   <style>
 
@@ -85,13 +85,14 @@
       --x-max: 56;
       --y-max: 70;
       --square-size: 64px;
+      --ruler-size: 22px;        /* thin ruler band -- independent of square size */
       --seed: 0;
 
       display: grid;
-      grid-template-columns: var(--square-size) repeat(var(--x-max), var(--square-size)) var(--square-size);
-      grid-template-rows:    var(--square-size) repeat(var(--y-max), var(--square-size)) var(--square-size);
+      grid-template-columns: var(--ruler-size) repeat(var(--x-max), var(--square-size)) var(--ruler-size);
+      grid-template-rows:    var(--ruler-size) repeat(var(--y-max), var(--square-size)) var(--ruler-size);
 
-      overflow: auto;            /* scroll map */
+      overflow: auto;            /* scroll map -- native drag/wheel panning */
       font-family: monospace;
     }
 
@@ -184,6 +185,7 @@
           content: counter(main-idx-var, custom-hex);
           color: white;
           text-shadow: 1px 1px black;
+          font-size: calc(var(--square-size) * 0.28);  /* label tracks the zoom */
 
           background-size: 100% 100%;
           image-rendering: pixelated;
@@ -248,20 +250,43 @@
           counter-reset: x-y-var var(--x-y);
           content: counter(x-y-var);
           color: GrayText;
+          font-size: 11px;         /* fit the thin ruler band */
           display: grid;
           place-content: center;
         }
       }
     }
 
-    /* The slider takes the body grid's auto row. As a grid item it stretches to the full
-       column width on its own, so it needs no width/display of its own. */
+    /* The controls bar takes the body grid's auto row; #map gets the 1fr row below it.
+       Each control is a plain range input bound to a CSS variable with a one-line inline
+       oninput -- the same idiom as the seed slider, and the same "no gesture handlers"
+       approach to zoom/pan as the earlier generations of this page. Zoom just drives
+       --square-size: because that changes the *layout* (not the visual viewport), the
+       sticky rulers stay pinned and zooming out works, which native pinch-zoom could not
+       do on a phone. Panning stays native (drag / wheel on #map). */
+    #controls {
+      display: flex;
+      gap: 1rem;
+      align-items: center;
+      padding: 0.4rem 0.6rem;
+      font: 0.8rem/1 monospace;
+    }
+    #controls label { display: flex; align-items: center; gap: 0.3rem; }
+    #controls input[type=range] { flex: 1; min-width: 0; }
   </style>
 </head>
 <body>
 
-  <input type="range" id="slider" min="0" max="15" value="0"
-         oninput="map.style.setProperty('--seed', this.value)">
+  <div id="controls">
+    <label>seed
+      <input type="range" id="slider" min="0" max="15" value="0"
+             oninput="map.style.setProperty('--seed', this.value)">
+    </label>
+    <label>zoom
+      <input type="range" id="zoom" min="16" max="160" value="64"
+             oninput="map.style.setProperty('--square-size', this.value + 'px')">
+    </label>
+  </div>
 
   <div id="map"></div>
 
